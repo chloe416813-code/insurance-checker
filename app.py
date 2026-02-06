@@ -109,9 +109,9 @@ def process_single_file(filename, content, password):
     return output, stats
 
 # ================= 網頁介面 (UI) =================
-st.set_page_config(page_title="投保名單檢查工具", page_icon="🚄")
+st.set_page_config(page_title="名單格式檢查工具", page_icon="🚄")
 
-st.title("🚄 科普列車 - 投保名單自動檢查工具")
+st.title("🚄 科普列車 - 名單格式自動檢查工具")
 st.markdown(f"**檢查標準日：{REF_DATE.date()}**")
 st.info("功能：自動統計年齡、檢查身分證格式、針對錯誤欄位標記黃底。支援 Excel 加密檔。")
 

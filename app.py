@@ -9,7 +9,7 @@ import zipfile
 
 # ================= 設定區 =================
 REF_DATE = datetime(2025, 10, 20)
-YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+YELLOW_FILL = PatternFill(start_color="FAB95B", end_color="FAB95B", fill_type="solid")
 
 # ================= 函式區 =================
 def parse_roc_birthday(roc_val):

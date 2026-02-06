@@ -17,29 +17,22 @@ except ImportError:
     st.error("🛑 缺少必要套件")
     st.stop()
 
-# ================= 1. 核心邏輯區 (來自您提供的程式碼) =================
-# 計算年齡的基準日
+# ================= 1. 核心邏輯區 (檢查功能) =================
 REF_DATE = datetime(2025, 10, 20)
-# 定義黃色標記
 YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
 def parse_roc_birthday(roc_val):
-    """ 解析民國年生日，回傳 datetime 物件，若格式錯誤回傳 None """
-    if roc_val is None: return None
+    """ 解析民國年生日 """
+    if pd.isna(roc_val): return None
     s = str(roc_val).strip().replace('\t', '').replace(' ', '')
     if s == '' or s.lower() == 'nan': return None
-
-    # 處理常見分隔符與中文
     s_clean = s.replace('年', '.').replace('月', '.').replace('日', '').replace('-', '.').replace('/', '.')
-
+    
     parts = []
-    if '.' in s_clean:
-        parts = s_clean.split('.')
+    if '.' in s_clean: parts = s_clean.split('.')
     elif s_clean.isdigit():
-        # 純數字處理
         if len(s_clean) == 6: parts = [s_clean[:2], s_clean[2:4], s_clean[4:]]
         elif len(s_clean) == 7: parts = [s_clean[:3], s_clean[3:5], s_clean[5:]]
-
     try:
         if len(parts) != 3: return None
         y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
@@ -55,15 +48,12 @@ def calculate_age(born):
 def open_excel_with_password(file_content, password):
     """ 嘗試開啟 Excel (支援加密與非加密) """
     file_stream = io.BytesIO(file_content)
-
-    # 1. 先嘗試直接開啟 (假設無加密)
+    # 1. 先嘗試直接開啟
     try:
         wb = openpyxl.load_workbook(file_stream)
         return wb
     except:
-        # 開啟失敗，可能是加密檔，重置指標
         file_stream.seek(0)
-
     # 2. 嘗試用密碼解鎖
     if password:
         try:
@@ -74,95 +64,73 @@ def open_excel_with_password(file_content, password):
             decrypted.seek(0)
             wb = openpyxl.load_workbook(decrypted)
             return wb
-        except Exception:
-            # 解密失敗
+        except:
             return None
-
     return None
 
 def process_single_file_logic(filename, content, password):
-    """ 
-    這是您原本的 process_single_file 函式
-    為了配合 Streamlit，微調了 print -> return 結構 
-    """
-    # 嘗試開啟
+    """ 檢查邏輯 (保留您原始程式碼結構) """
     wb = open_excel_with_password(content, password)
 
     if wb is None:
         return None, {"filename": filename, "status": "Fail", "msg": "無法開啟(密碼錯誤或格式不支援)"}
 
     ws = wb.active
-
-    # 自動尋找欄位
     col_idx_map = {}
-    # 這裡稍微增強一點：避免讀到空行，搜尋前幾行
+    
+    # 找表頭 (稍微增強避免空行)
     header_found = False
     for row in ws.iter_rows(min_row=1, max_row=5):
         for cell in row:
-            if cell.value:
-                col_idx_map[str(cell.value)] = cell.column
+            if cell.value: col_idx_map[str(cell.value)] = cell.column
         if '身分證' in col_idx_map or any('身分證' in str(k) for k in col_idx_map.keys()):
             header_found = True
             break
             
     if not header_found:
-         # 如果找不到表頭，回退到第一行嘗試
          col_idx_map = {}
          for row in ws.iter_rows(min_row=1, max_row=1):
             for cell in row:
                 if cell.value: col_idx_map[str(cell.value)] = cell.column
 
-    # 關鍵字對應
     id_key = next((k for k in col_idx_map.keys() if '身分證' in k), None)
     birth_key = next((k for k in col_idx_map.keys() if '生日' in k and '民國' in k), None)
 
     stats = {"filename": filename, "under_15": 0, "adult": 0, "errors": 0, "status": "Success", "msg": "OK"}
 
     if not id_key or not birth_key:
-        return None, {"filename": filename, "status": "Fail", "msg": "找不到關鍵欄位(需有'身分證'與'生日(民國)')"}
+        return None, {"filename": filename, "status": "Fail", "msg": "找不到關鍵欄位"}
 
     xl_birth_col = col_idx_map[birth_key]
     xl_id_col = col_idx_map[id_key]
-
-    # 逐列檢查並標記
-    # 注意：這裡從 min_row=2 開始，假設第一列是表頭。如果您的表頭在第3列，這裡可能要調整
-    # 為了保險，我們從表頭所在列的下一列開始
-    start_row = 2 
     
+    # 判斷資料起始列
+    start_row = 2 
     for row in ws.iter_rows(min_row=start_row):
         # 1. 檢查生日
-        if xl_birth_col:
-            # 防止索引超出範圍 (如果該列是空的)
-            if xl_birth_col - 1 < len(row):
-                cell_birth = row[xl_birth_col - 1]
-                birth_dt = parse_roc_birthday(cell_birth.value)
+        if xl_birth_col and xl_birth_col - 1 < len(row):
+            cell_birth = row[xl_birth_col - 1]
+            birth_dt = parse_roc_birthday(cell_birth.value)
 
-                if birth_dt is None:
-                    cell_birth.fill = YELLOW_FILL # 標記黃底
-                    stats["errors"] += 1
-                else:
-                    age = calculate_age(birth_dt)
-                    if 0 <= age < 15:
-                        stats["under_15"] += 1
-                    elif age >= 15:
-                        stats["adult"] += 1
+            if birth_dt is None:
+                cell_birth.fill = YELLOW_FILL
+                stats["errors"] += 1
+            else:
+                age = calculate_age(birth_dt)
+                if 0 <= age < 15: stats["under_15"] += 1
+                elif age >= 15: stats["adult"] += 1
 
         # 2. 檢查身分證
-        if xl_id_col:
-            if xl_id_col - 1 < len(row):
-                cell_id = row[xl_id_col - 1]
-                val_id = str(cell_id.value).strip() if cell_id.value else ""
+        if xl_id_col and xl_id_col - 1 < len(row):
+            cell_id = row[xl_id_col - 1]
+            val_id = str(cell_id.value).strip() if cell_id.value else ""
+            if not val_id or val_id == 'None' or len(val_id) != 10:
+                cell_id.fill = YELLOW_FILL
+                stats["errors"] += 1
 
-                # 檢查漏填或長度錯誤
-                if not val_id or val_id == 'None' or len(val_id) != 10:
-                    cell_id.fill = YELLOW_FILL # 標記黃底
-                    stats["errors"] += 1
-
-    # 存檔到記憶體
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
-
     return output, stats
 
 # ================= 2. 分頁功能實作 =================
@@ -175,48 +143,58 @@ def run_checker_tab(uploaded_files, password):
     for i, file in enumerate(uploaded_files):
         content = file.read()
         processed_data, stats = process_single_file_logic(file.name, content, password)
-        
         summary_report.append(stats)
         if processed_data:
-            # 這裡回傳的是 openpyxl 處理完的 output (含黃底，但無密碼)
             processed_files.append((f"已檢查_{file.name}", processed_data.getvalue()))
-            
         progress_bar.progress((i + 1) / len(uploaded_files))
         
     return processed_files, summary_report
 
 def run_encryptor_tab(uploaded_files, new_password):
+    """ 分頁 2: 批次加密 (強力清洗版) """
     processed_files = []
     progress_bar = st.progress(0)
     
     for i, file in enumerate(uploaded_files):
         try:
             content = file.read()
-            # 1. 讀取檔案
-            # 這裡使用 pd.read_excel，它會自動處理大部分格式
-            # 如果是從分頁1下載下來的檔案，它是沒有密碼的，可以直接讀
-            try:
-                df = pd.read_excel(io.BytesIO(content))
-            except:
-                # 萬一使用者上傳了有密碼的檔案
-                st.error(f"❌ {file.name}: 讀取失敗。請確認上傳的是【無密碼】的檔案 (例如從分頁1下載的檔案)。")
-                continue
+            file_stream = io.BytesIO(content)
             
-            # 2. 加密寫入
-            # 使用 xlsxwriter 引擎進行加密
+            # 1. 檢查檔案是否已加密
+            is_already_encrypted = False
+            try:
+                office_file = msoffcrypto.OfficeFile(file_stream)
+                if office_file.is_encrypted():
+                    is_already_encrypted = True
+            except:
+                pass # 不是 Office 檔案或沒加密
+            
+            if is_already_encrypted:
+                st.error(f"❌ {file.name}: 檔案原本就有密碼！請先解鎖成無密碼檔案後再上傳。")
+                continue
+
+            # 2. 讀取數據 (清洗數據)
+            # 使用 openpyxl 讀取值，不讀取樣式，避免格式干擾
+            file_stream.seek(0)
+            wb_in = openpyxl.load_workbook(file_stream, data_only=True)
+            ws_in = wb_in.active
+            
+            # 轉成 DataFrame
+            data = ws_in.values
+            cols = next(data)
+            df = pd.DataFrame(data, columns=cols)
+            
+            # 3. 寫入全新的加密檔案
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # 將資料寫入
                 df.to_excel(writer, index=False, sheet_name='Sheet1')
                 workbook = writer.book
-                
-                # 設定密碼
-                workbook.set_encryption(new_password)
+                workbook.set_encryption(new_password)  # 設定密碼
             
             processed_files.append((f"加密_{file.name}", output.getvalue()))
             
         except Exception as e:
-            st.error(f"❌ {file.name} 加密失敗: {e}")
+            st.error(f"❌ {file.name} 加密失敗: {str(e)}")
             
         progress_bar.progress((i + 1) / len(uploaded_files))
         
@@ -229,11 +207,11 @@ st.title("🧰 科普列車 - 投保名單工具箱")
 
 tab1, tab2 = st.tabs(["🔍 1. 檢查名單", "🔒 2. 批次加密"])
 
-# --- 分頁 1: 檢查 (完全依照您的程式碼) ---
+# --- 分頁 1: 檢查 ---
 with tab1:
     st.header("名單檢查工具")
-    st.info("功能：讀取 Excel (支援加密) -> 標記黃底 -> 輸出 **無密碼** 檔案。")
-    st.caption("請使用此頁面檢查檔案，下載確認沒問題後，再到「分頁 2」進行加密。")
+    st.info("功能：讀取 Excel (支援加密) -> 檢查並標記黃底 -> 輸出 **無密碼** 檔案。")
+    st.caption("建議流程：在此頁檢查並下載無密碼檔 -> 確認內容 -> 到分頁 2 進行加密。")
     
     check_pass = st.text_input("輸入解鎖密碼 (若檔案無加密可留空)", type="password", key="p1")
     check_files = st.file_uploader("上傳 Excel", type=['xlsx'], accept_multiple_files=True, key="u1")
@@ -242,9 +220,7 @@ with tab1:
         results, report = run_checker_tab(check_files, check_pass)
         
         if report:
-            # 簡單顯示結果
-            df_rep = pd.DataFrame(report)
-            st.dataframe(df_rep)
+            st.dataframe(pd.DataFrame(report))
             
         if results:
             zip_buffer = io.BytesIO()
@@ -266,7 +242,7 @@ with tab1:
 # --- 分頁 2: 加密 ---
 with tab2:
     st.header("Excel 批次加密")
-    st.info("功能：將 **無密碼** 的 Excel 檔案加上密碼保護。")
+    st.warning("⚠️ 請注意：此處僅接受 **無密碼** 的 Excel 檔案 (例如剛從分頁 1 下載的檔案)。")
     
     enc_pass = st.text_input("設定新密碼 (必填)", type="password", key="p2")
     enc_files = st.file_uploader("上傳要加密的 Excel (需無密碼)", type=['xlsx'], accept_multiple_files=True, key="u2")

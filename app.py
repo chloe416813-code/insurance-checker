@@ -1,25 +1,22 @@
 import streamlit as st
 import pandas as pd
 import io
-import msoffcrypto
-from datetime import datetime
-import openpyxl
-from openpyxl.styles import PatternFill
 import zipfile
-import xlsxwriter
+from datetime import datetime
+import sys
 
-# ================= 0. 系統環境檢查 =================
+# ================= 0. 系統診斷區 (Debug) =================
+# 這段程式碼會幫助我們確認環境是否正常
 try:
     import openpyxl
     import msoffcrypto
     import xlsxwriter
-except ImportError:
-    st.error("🛑 缺少必要套件，請檢查 requirements.txt")
+except ImportError as e:
+    st.error(f"🛑 嚴重錯誤：缺少套件 {e}")
     st.stop()
 
 # ================= 1. 核心邏輯區 =================
 REF_DATE = datetime(2025, 10, 20)
-YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
 def parse_roc_birthday(roc_val):
     if pd.isna(roc_val): return None
@@ -45,7 +42,6 @@ def calculate_age(born):
     return REF_DATE.year - born.year - ((REF_DATE.month, REF_DATE.day) < (born.month, born.day))
 
 def open_excel_safe(file_content, password):
-    """ 安全開啟 Excel (支援加密) """
     file_stream = io.BytesIO(file_content)
     try:
         return openpyxl.load_workbook(file_stream)
@@ -65,7 +61,7 @@ def open_excel_safe(file_content, password):
     return None
 
 def process_file_logic(filename, content, password):
-    """ 分頁 1 邏輯：只檢查，不加密回存 """
+    """ 分頁 1: 檢查邏輯 (使用 openpyxl) """
     wb = open_excel_safe(content, password)
     if wb is None:
         return None, {"filename": filename, "status": "Fail", "msg": "無法開啟 (密碼錯誤或格式不支援)"}
@@ -73,7 +69,6 @@ def process_file_logic(filename, content, password):
     ws = wb.active
     col_idx_map = {}
     
-    # 找表頭
     header_found = False
     for row in ws.iter_rows(min_row=1, max_row=5):
         for cell in row:
@@ -99,27 +94,28 @@ def process_file_logic(filename, content, password):
     xl_birth = col_idx_map[birth_key]
     xl_id = col_idx_map[id_key]
     
-    # 開始檢查 (跳過表頭)
+    # 這裡需要重新定義黃色，因為 openpyxl 版本可能不同
+    from openpyxl.styles import PatternFill
+    YELLOW = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+
     start_row = 2 
     for row in ws.iter_rows(min_row=start_row):
-        # 檢查生日
         if xl_birth and xl_birth - 1 < len(row):
             cell = row[xl_birth - 1]
             dt = parse_roc_birthday(cell.value)
             if dt is None:
-                cell.fill = YELLOW_FILL
+                cell.fill = YELLOW
                 stats["errors"] += 1
             else:
                 age = calculate_age(dt)
                 if 0 <= age < 15: stats["under_15"] += 1
                 elif age >= 15: stats["adult"] += 1
 
-        # 檢查身分證
         if xl_id and xl_id - 1 < len(row):
             cell = row[xl_id - 1]
             val = str(cell.value).strip() if cell.value else ""
             if not val or val == 'None' or len(val) != 10:
-                cell.fill = YELLOW_FILL
+                cell.fill = YELLOW
                 stats["errors"] += 1
 
     output = io.BytesIO()
@@ -127,75 +123,88 @@ def process_file_logic(filename, content, password):
     output.seek(0)
     return output, stats
 
-# ================= 2. 分頁功能 =================
+# ================= 2. 執行函式 =================
 
 def run_checker(files, pwd):
     processed = []
     report = []
     bar = st.progress(0)
-    
     for i, f in enumerate(files):
         data, stats = process_file_logic(f.name, f.read(), pwd)
         report.append(stats)
         if data:
-            # 這裡回傳的是 openpyxl 存的檔，絕對沒有密碼
             processed.append((f"已檢查_{f.name}", data.getvalue()))
         bar.progress((i + 1) / len(files))
     return processed, report
 
-def run_encryptor_native(files, pwd):
-    """ 使用 xlsxwriter 原生寫入，避開 pandas 引擎衝突 """
+def run_encryptor_debug(files, pwd):
+    """ 分頁 2: 診斷式加密 """
     processed = []
     bar = st.progress(0)
     
     for i, f in enumerate(files):
         try:
             content = f.read()
-            # 讀取資料
+            # 讀取
             try:
                 df = pd.read_excel(io.BytesIO(content))
             except:
                 st.error(f"❌ {f.name}: 讀取失敗，請確認檔案無密碼。")
                 continue
             
-            # 使用原生 xlsxwriter 寫入加密
+            # 寫入
             output = io.BytesIO()
-            workbook = xlsxwriter.Workbook(output, {'in_memory': True})
-            worksheet = workbook.add_worksheet()
             
-            # 寫入資料
-            header = df.columns.values
-            for c, val in enumerate(header):
-                worksheet.write(0, c, str(val))
-            
-            data = df.fillna("").values
-            for r, row in enumerate(data):
-                for c, val in enumerate(row):
-                    worksheet.write(r + 1, c, val)
-            
-            # 設定密碼 (這是導致錯誤的關鍵，原生寫法才穩)
-            workbook.set_encryption(pwd)
-            workbook.close()
-            
-            output.seek(0)
-            processed.append((f"加密_{f.name}", output.getvalue()))
-            
+            # --- 關鍵診斷點 ---
+            # 我們強制使用 xlsxwriter，並在出錯時印出物件類型
+            try:
+                workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+                worksheet = workbook.add_worksheet()
+                
+                # 寫資料
+                header = df.columns.values
+                for c, val in enumerate(header):
+                    worksheet.write(0, c, str(val))
+                data = df.fillna("").values
+                for r, row in enumerate(data):
+                    for c, val in enumerate(row):
+                        worksheet.write(r + 1, c, val)
+                
+                # 嘗試加密
+                if hasattr(workbook, 'set_encryption'):
+                    workbook.set_encryption(pwd)
+                else:
+                    # 萬一真的發生靈異現象，這裡會抓到
+                    raise Exception(f"物件類型錯誤: {type(workbook)}，它沒有 set_encryption 方法")
+                
+                workbook.close()
+                output.seek(0)
+                processed.append((f"加密_{f.name}", output.getvalue()))
+                
+            except Exception as inner_e:
+                st.error(f"❌ {f.name} 寫入階段失敗: {inner_e}")
+                
         except Exception as e:
-            st.error(f"❌ {f.name} 加密失敗: {e}")
+            st.error(f"❌ {f.name} 整體失敗: {e}")
         bar.progress((i + 1) / len(files))
     return processed
 
 # ================= 3. 主介面 =================
 
-st.set_page_config(page_title="投保工具箱 V3.0", page_icon="🧰")
-st.title("🧰 科普列車 - 投保工具箱 V3.0")
+st.set_page_config(page_title="投保工具箱 V4.0 (診斷版)", page_icon="🛠️")
+st.title("🛠️ 投保工具箱 V4.0 (診斷版)")
+
+# 顯示環境資訊 (Debug info)
+with st.expander("ℹ️ 系統環境資訊 (若報錯請截圖此處)"):
+    st.write(f"XlsxWriter Version: {xlsxwriter.__version__}")
+    st.write(f"Python Version: {sys.version}")
 
 tab1, tab2 = st.tabs(["🔍 1. 檢查名單", "🔒 2. 批次加密"])
 
 with tab1:
     st.header("名單檢查")
-    st.info("此頁面檢查後下載的檔案為【無密碼】。確認內容無誤後，請到分頁 2 進行加密。")
-    pwd = st.text_input("輸入解鎖密碼 (若檔案無加密可留空)", type="password", key="p1")
+    st.info("檢查後輸出【無密碼】檔案。")
+    pwd = st.text_input("輸入解鎖密碼", type="password", key="p1")
     files1 = st.file_uploader("上傳 Excel", type=['xlsx'], accept_multiple_files=True, key="u1")
     
     if files1 and st.button("🚀 開始檢查", key="b1"):
@@ -205,24 +214,22 @@ with tab1:
             z = io.BytesIO()
             with zipfile.ZipFile(z, "w") as zf:
                 for n, d in res: zf.writestr(n, d)
-                txt = "檢查報告\n" + "\n".join([f"{r['filename']}: {r['msg']}" for r in rep])
+                txt = "\n".join([f"{r['filename']}: {r['msg']}" for r in rep])
                 zf.writestr("report.txt", txt)
-            st.download_button("📦 下載檢查結果 (ZIP)", z.getvalue(), "檢查結果.zip", "application/zip")
+            st.download_button("📦 下載結果", z.getvalue(), "檢查結果.zip", "application/zip")
 
 with tab2:
     st.header("批次加密")
-    st.warning("請上傳【無密碼】的檔案 (例如從分頁 1 下載的檔案)。")
+    st.warning("請上傳無密碼檔案。")
     new_pwd = st.text_input("設定新密碼", type="password", key="p2")
-    files2 = st.file_uploader("上傳要加密的檔案", type=['xlsx'], accept_multiple_files=True, key="u2")
+    files2 = st.file_uploader("上傳加密檔案", type=['xlsx'], accept_multiple_files=True, key="u2")
     
     if files2 and new_pwd:
         if st.button("🔒 開始加密", key="b2"):
-            res = run_encryptor_native(files2, new_pwd)
+            res = run_encryptor_debug(files2, new_pwd)
             if res:
-                st.success(f"成功加密 {len(res)} 個檔案")
+                st.success(f"加密成功 {len(res)} 個")
                 z = io.BytesIO()
                 with zipfile.ZipFile(z, "w") as zf:
                     for n, d in res: zf.writestr(n, d)
-                st.download_button("📦 下載加密檔案 (ZIP)", z.getvalue(), "已加密.zip", "application/zip")
-    elif files2 and not new_pwd:
-        st.warning("請輸入密碼！")
+                st.download_button("📦 下載加密檔", z.getvalue(), "已加密.zip", "application/zip")

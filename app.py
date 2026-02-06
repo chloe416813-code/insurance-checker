@@ -1,35 +1,45 @@
 import streamlit as st
 import pandas as pd
 import io
-import zipfile
+import msoffcrypto
 from datetime import datetime
+import openpyxl
+from openpyxl.styles import PatternFill
+import zipfile
+import xlsxwriter
 
-# ================= 0. 系統環境防呆 =================
+# ================= 0. 系統環境檢查 =================
 try:
     import openpyxl
     import msoffcrypto
     import xlsxwriter
-except ImportError as e:
-    st.error(f"🛑 缺少必要套件: {e}")
-    st.info("請確認 requirements.txt 包含: streamlit, pandas, openpyxl, msoffcrypto-tool, XlsxWriter")
+except ImportError:
+    st.error("🛑 缺少必要套件")
     st.stop()
 
-# ================= 1. 共用函式區 =================
+# ================= 1. 核心邏輯區 (移植自您的程式碼) =================
+# 計算年齡的基準日
 REF_DATE = datetime(2025, 10, 20)
+# 定義黃色標記
+YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
 def parse_roc_birthday(roc_val):
-    """ 解析民國年生日 """
-    if pd.isna(roc_val): return None
+    """ 解析民國年生日，回傳 datetime 物件，若格式錯誤回傳 None """
+    if roc_val is None: return None
     s = str(roc_val).strip().replace('\t', '').replace(' ', '')
     if s == '' or s.lower() == 'nan': return None
+
+    # 處理常見分隔符與中文
     s_clean = s.replace('年', '.').replace('月', '.').replace('日', '').replace('-', '.').replace('/', '.')
-    
+
     parts = []
-    if '.' in s_clean: parts = s_clean.split('.')
+    if '.' in s_clean:
+        parts = s_clean.split('.')
     elif s_clean.isdigit():
+        # 純數字處理
         if len(s_clean) == 6: parts = [s_clean[:2], s_clean[2:4], s_clean[4:]]
         elif len(s_clean) == 7: parts = [s_clean[:3], s_clean[3:5], s_clean[5:]]
-    
+
     try:
         if len(parts) != 3: return None
         y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
@@ -42,172 +52,154 @@ def calculate_age(born):
     if born is None: return -1
     return REF_DATE.year - born.year - ((REF_DATE.month, REF_DATE.day) < (born.month, born.day))
 
-def get_decrypted_stream(file_content, password):
-    """ 
-    【經典暴力解鎖法】 
-    這是之前測試最成功的版本：
-    1. 有密碼 -> 優先嘗試解密。
-    2. 失敗或無密碼 -> 嘗試直接開啟。
-    """
-    # 策略 A: 嘗試用密碼解密
+def open_excel_with_password(file_content, password):
+    """ 嘗試開啟 Excel (支援加密與非加密) """
+    file_stream = io.BytesIO(file_content)
+
+    # 1. 先嘗試直接開啟 (假設無加密)
+    try:
+        wb = openpyxl.load_workbook(file_stream)
+        return wb
+    except:
+        # 開啟失敗，可能是加密檔，重置指標
+        file_stream.seek(0)
+
+    # 2. 嘗試用密碼解鎖
     if password:
         try:
-            file_stream = io.BytesIO(file_content)
+            decrypted = io.BytesIO()
             office_file = msoffcrypto.OfficeFile(file_stream)
             office_file.load_key(password=password)
-            decrypted = io.BytesIO()
             office_file.decrypt(decrypted)
             decrypted.seek(0)
-            
-            # 測試是否真的解開了 (試讀一行)
-            pd.read_excel(decrypted, nrows=1) 
-            decrypted.seek(0)
-            return decrypted, True, "OK" # True = 原本是加密的
-        except:
-            pass # 密碼錯誤或根本沒加密，默默失敗，換下一招
+            wb = openpyxl.load_workbook(decrypted)
+            return wb
+        except Exception:
+            # 解密失敗
+            return None
 
-    # 策略 B: 嘗試直接開啟 (針對無加密檔案)
-    try:
-        file_stream = io.BytesIO(file_content)
-        pd.read_excel(file_stream, nrows=1)
-        file_stream.seek(0)
-        return file_stream, False, "OK" # False = 原本沒加密
-    except:
-        pass
+    return None
 
-    # 策略 C: 都失敗
-    return None, False, "無法讀取 (可能是密碼錯誤，或檔案損毀)"
+def process_single_file_logic(filename, content, password):
+    """ 
+    這是您原本的 process_single_file 函式
+    為了配合 Streamlit，微調了 print -> return 結構 
+    """
+    # 嘗試開啟
+    wb = open_excel_with_password(content, password)
+
+    if wb is None:
+        return None, {"filename": filename, "status": "Fail", "msg": "無法開啟(密碼錯誤或格式不支援)"}
+
+    ws = wb.active
+
+    # 自動尋找欄位
+    col_idx_map = {}
+    for row in ws.iter_rows(min_row=1, max_row=1):
+        for cell in row:
+            if cell.value:
+                col_idx_map[str(cell.value)] = cell.column
+
+    # 關鍵字對應
+    id_key = next((k for k in col_idx_map.keys() if '身分證' in k), None)
+    birth_key = next((k for k in col_idx_map.keys() if '生日' in k and '民國' in k), None)
+
+    stats = {"filename": filename, "under_15": 0, "adult": 0, "errors": 0, "status": "Success", "msg": "OK"}
+
+    if not id_key or not birth_key:
+        return None, {"filename": filename, "status": "Fail", "msg": "找不到關鍵欄位"}
+
+    xl_birth_col = col_idx_map[birth_key]
+    xl_id_col = col_idx_map[id_key]
+
+    # 逐列檢查並標記
+    for row in ws.iter_rows(min_row=2):
+        # 1. 檢查生日
+        if xl_birth_col:
+            cell_birth = row[xl_birth_col - 1]
+            birth_dt = parse_roc_birthday(cell_birth.value)
+
+            if birth_dt is None:
+                cell_birth.fill = YELLOW_FILL # 標記黃底
+                stats["errors"] += 1
+            else:
+                age = calculate_age(birth_dt)
+                if 0 <= age < 15:
+                    stats["under_15"] += 1
+                elif age >= 15:
+                    stats["adult"] += 1
+
+        # 2. 檢查身分證
+        if xl_id_col:
+            cell_id = row[xl_id_col - 1]
+            val_id = str(cell_id.value).strip() if cell_id.value else ""
+
+            # 檢查漏填或長度錯誤
+            if not val_id or val_id == 'None' or len(val_id) != 10:
+                cell_id.fill = YELLOW_FILL # 標記黃底
+                stats["errors"] += 1
+
+    # 存檔到記憶體
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return output, stats
 
 # ================= 2. 分頁功能實作 =================
 
-def run_checker(uploaded_files, password):
-    """ 分頁 1: 檢查功能 (回歸最原始版本) """
+def run_checker_tab(uploaded_files, password):
     processed_files = []
     summary_report = []
     progress_bar = st.progress(0)
     
     for i, file in enumerate(uploaded_files):
-        # 1. 取得檔案串流
         content = file.read()
-        decrypted_stream, is_encrypted, msg = get_decrypted_stream(content, password)
+        processed_data, stats = process_single_file_logic(file.name, content, password)
         
-        if decrypted_stream is None:
-            # 記錄失敗
-            summary_report.append({"filename": file.name, "status": "Fail", "msg": msg})
-            continue
-
-        # 2. 讀取 DataFrame
-        try:
-            # 找表頭
-            preview = pd.read_excel(decrypted_stream, nrows=30, header=None)
-            decrypted_stream.seek(0)
-            
-            header_idx = 0
-            found = False
-            for idx, row in preview.iterrows():
-                row_str = row.astype(str).values
-                if any('身分證' in s for s in row_str) and any('生日' in s for s in row_str):
-                    header_idx = idx
-                    found = True
-                    break
-            if not found: header_idx = 0
-            
-            df = pd.read_excel(decrypted_stream, header=header_idx)
-            
-        except Exception as e:
-            summary_report.append({"filename": file.name, "status": "Fail", "msg": f"讀取錯誤: {e}"})
-            continue
-
-        # 3. 找欄位
-        cols = [str(c) for c in df.columns]
-        id_col = next((c for c in cols if '身分證' in c), None)
-        birth_col = next((c for c in cols if '生日' in c and '民國' in c), None)
-        
-        stats = {"filename": file.name, "under_15": 0, "adult": 0, "errors": 0, "status": "Success", "msg": "OK"}
-        if is_encrypted: stats["msg"] += " (含加密)"
-
-        if not id_col or not birth_col:
-            summary_report.append({"filename": file.name, "status": "Fail", "msg": "找不到關鍵欄位"})
-            continue
-
-        # 4. 檢查與標記
-        output = io.BytesIO()
-        error_cells = []
-        
-        id_idx = df.columns.get_loc(id_col)
-        birth_idx = df.columns.get_loc(birth_col)
-
-        for index, row in df.iterrows():
-            # 生日
-            birth_val = row[birth_col]
-            birth_dt = parse_roc_birthday(birth_val)
-            is_birth_err = False
-            
-            if birth_dt is None:
-                stats["errors"] += 1
-                error_cells.append((index, birth_idx))
-                is_birth_err = True
-            else:
-                age = calculate_age(birth_dt)
-                if 0 <= age < 15: stats["under_15"] += 1
-                elif age >= 15: stats["adult"] += 1
-
-            # 身分證
-            id_val = str(row[id_col]).strip() if pd.notna(row[id_col]) else ""
-            if not id_val or id_val == 'nan' or len(id_val) != 10:
-                if not is_birth_err: stats["errors"] += 1
-                error_cells.append((index, id_idx))
-
-        # 5. 寫入 Excel
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Sheet1')
-            workbook = writer.book
-            worksheet = writer.sheets['Sheet1']
-            yellow = workbook.add_format({'bg_color': '#FFFF00'})
-            
-            for r, c in error_cells:
-                val = df.iat[r, c]
-                if pd.isna(val): val = ""
-                worksheet.write(r + 1, c, val, yellow)
-            
-            worksheet.set_column(0, len(cols)-1, 15)
-
-            # 如果原本有加密，輸出就加密 (維持原始邏輯)
-            final_pass = password if (is_encrypted or password) else None
-            if final_pass:
-                workbook.set_encryption(final_pass)
-
-        processed_files.append((f"已檢查_{file.name}", output.getvalue()))
         summary_report.append(stats)
+        if processed_data:
+            processed_files.append((f"已檢查_{file.name}", processed_data.getvalue()))
+            
         progress_bar.progress((i + 1) / len(uploaded_files))
         
     return processed_files, summary_report
 
-def run_encryptor(uploaded_files, new_password):
-    """ 分頁 2: 單純加密功能 """
+def run_encryptor_tab(uploaded_files, new_password):
     processed_files = []
     progress_bar = st.progress(0)
     
     for i, file in enumerate(uploaded_files):
         try:
-            content = file.read()
-            # 嘗試直接讀取 (假設使用者上傳的是乾淨的無鎖檔案)
-            # 如果是加密檔，這裡會報錯，我們會捕捉它
-            df = pd.read_excel(io.BytesIO(content))
+            # 使用 open_excel_with_password 讀取 (支援解鎖)
+            # 這樣如果使用者直接把剛檢查完(無鎖)的檔，或是原始(有鎖)的檔丟進來，都能處理
+            wb = open_excel_with_password(file.read(), None) # 先試無密碼
+            
+            # 如果讀不到，可能原本就有鎖，這裡先不處理太複雜的「舊密碼轉新密碼」
+            # 假設使用者是拿「檢查完的無鎖檔」來加密
+            if wb is None:
+                st.error(f"❌ {file.name}: 無法讀取 (請上傳無密碼的檔案)")
+                continue
+
+            # 轉成 DataFrame 以便用 XlsxWriter 寫入加密
+            # 注意：這會遺失原始格式，但能確保加密穩定性
+            # 若要保留格式且加密，技術門檻極高且不穩定
+            # 這裡採用最穩定的「資料轉移加密法」
+            data = wb.active.values
+            cols = next(data)
+            df = pd.DataFrame(data, columns=cols)
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df.to_excel(writer, index=False, sheet_name='Sheet1')
                 workbook = writer.book
-                # 設定密碼
                 workbook.set_encryption(new_password)
             
             processed_files.append((f"加密_{file.name}", output.getvalue()))
             
         except Exception as e:
-            # 這裡捕捉錯誤 (例如上傳了加密檔但想重新加密)
-            st.error(f"❌ {file.name} 失敗: {e} (若檔案原本有加密，請先解鎖再上傳)")
-        
+            st.error(f"❌ {file.name} 加密失敗: {e}")
+            
         progress_bar.progress((i + 1) / len(uploaded_files))
         
     return processed_files
@@ -219,19 +211,21 @@ st.title("🧰 科普列車 - 投保名單工具箱")
 
 tab1, tab2 = st.tabs(["🔍 1. 檢查名單", "🔒 2. 批次加密"])
 
-# --- 分頁 1: 檢查 (原始版本) ---
+# --- 分頁 1: 檢查 (完全依照您的程式碼) ---
 with tab1:
     st.header("名單檢查工具")
-    st.info("此分頁功能：解鎖加密檔 -> 檢查格式 -> 標記黃底 -> (若有密碼則加密回存)。")
+    st.markdown("功能：讀取 Excel (支援加密) -> 標記黃底 -> 輸出 **無密碼** 檔案。")
     
     check_pass = st.text_input("輸入解鎖密碼 (若檔案無加密可留空)", type="password", key="p1")
     check_files = st.file_uploader("上傳 Excel", type=['xlsx'], accept_multiple_files=True, key="u1")
     
     if check_files and st.button("🚀 開始檢查", key="b1"):
-        results, report = run_checker(check_files, check_pass)
+        results, report = run_checker_tab(check_files, check_pass)
         
         if report:
-            st.dataframe(pd.DataFrame(report))
+            # 簡單顯示結果
+            df_rep = pd.DataFrame(report)
+            st.dataframe(df_rep)
             
         if results:
             zip_buffer = io.BytesIO()
@@ -246,24 +240,24 @@ with tab1:
                         report_str += f"{item['filename']}: 未滿15歲:{item['under_15']}, 成人:{item['adult']}, 錯誤:{item['errors']}\n"
                     else:
                         report_str += f"{item['filename']}: {item['msg']}\n"
-                zf.writestr("報告.txt", report_str)
+                zf.writestr("檢查報告.txt", report_str)
                 
             st.download_button("📦 下載檢查結果 (ZIP)", zip_buffer.getvalue(), "檢查結果.zip", "application/zip")
 
-# --- 分頁 2: 加密 (新功能) ---
+# --- 分頁 2: 加密 ---
 with tab2:
     st.header("Excel 批次加密")
-    st.info("將無密碼的 Excel 檔加上密碼。")
+    st.markdown("功能：將 **無密碼** 的 Excel 檔案加上密碼保護。")
     
     enc_pass = st.text_input("設定新密碼 (必填)", type="password", key="p2")
-    enc_files = st.file_uploader("上傳要加密的 Excel (需無密碼)", type=['xlsx'], accept_multiple_files=True, key="u2")
+    enc_files = st.file_uploader("上傳要加密的 Excel", type=['xlsx'], accept_multiple_files=True, key="u2")
     
     if enc_files:
         if not enc_pass:
             st.warning("請輸入要設定的密碼！")
         else:
             if st.button("🔒 開始加密", key="b2"):
-                enc_results = run_encryptor(enc_files, enc_pass)
+                enc_results = run_encryptor_tab(enc_files, enc_pass)
                 
                 if enc_results:
                     st.success(f"成功加密 {len(enc_results)} 個檔案")
@@ -272,4 +266,4 @@ with tab2:
                         for fname, data in enc_results:
                             zf.writestr(fname, data)
                     
-                    st.download_button("📦 下載已加密檔案 (ZIP)", zip_buffer.getvalue(), "已加密.zip", "application/zip")
+                    st.download_button("📦 下載加密檔案 (ZIP)", zip_buffer.getvalue(), "已加密檔案.zip", "application/zip")

@@ -5,7 +5,7 @@ import msoffcrypto
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import PatternFill
-import zipfile
+import pyzipper  # 改用這個來做加密壓縮
 
 # ================= 設定區 =================
 REF_DATE = datetime(2025, 10, 20)
@@ -36,15 +36,14 @@ def calculate_age(born):
     return REF_DATE.year - born.year - ((REF_DATE.month, REF_DATE.day) < (born.month, born.day))
 
 def open_excel_with_password(file_content, password):
-    """ 嘗試開啟 Excel，回傳 (Workbook物件, 是否曾被加密) """
+    """ 嘗試開啟 Excel """
     file_stream = io.BytesIO(file_content)
     
     # 1. 先嘗試直接開啟 (無加密)
     try:
         wb = openpyxl.load_workbook(file_stream)
-        return wb, False
+        return wb
     except:
-        # 開啟失敗，可能是加密檔，重置指標
         file_stream.seek(0)
     
     # 2. 嘗試用密碼解鎖
@@ -56,34 +55,13 @@ def open_excel_with_password(file_content, password):
             office_file.decrypt(decrypted)
             decrypted.seek(0)
             wb = openpyxl.load_workbook(decrypted)
-            return wb, True # 標記此檔案原本有加密
+            return wb
         except:
-            return None, False
-    return None, False
-
-def save_excel_encrypted(wb, password):
-    """ 將 Workbook 存檔並用密碼加密 """
-    # 1. 先存成未加密的 BytesIO
-    temp_buffer = io.BytesIO()
-    wb.save(temp_buffer)
-    temp_buffer.seek(0)
-
-    # 2. 如果原本沒密碼，直接回傳
-    if not password:
-        return temp_buffer
-
-    # 3. 如果原本有密碼，進行加密
-    encrypted_buffer = io.BytesIO()
-    office_file = msoffcrypto.OfficeFile(temp_buffer)
-    office_file.load_key(password=password)
-    office_file.encrypt(encrypted_buffer) # 加密寫入
-    encrypted_buffer.seek(0)
-    
-    return encrypted_buffer
+            return None
+    return None
 
 def process_single_file(filename, content, password):
-    # 改為接收兩個回傳值：wb 和 is_encrypted
-    wb, is_encrypted = open_excel_with_password(content, password)
+    wb = open_excel_with_password(content, password)
     
     if wb is None:
         return None, {"filename": filename, "status": "Fail", "msg": "無法開啟(密碼錯誤或格式不支援)"}
@@ -102,8 +80,6 @@ def process_single_file(filename, content, password):
     birth_key = next((k for k in col_idx_map.keys() if '生日' in k and '民國' in k), None)
     
     stats = {"filename": filename, "under_15": 0, "adult": 0, "errors": 0, "status": "Success", "msg": "OK"}
-    if is_encrypted:
-        stats["msg"] += " (已重新加密)"
 
     if not id_key or not birth_key:
         return None, {"filename": filename, "status": "Fail", "msg": "找不到關鍵欄位"}
@@ -132,9 +108,10 @@ def process_single_file(filename, content, password):
                 cell_id.fill = YELLOW_FILL
                 stats["errors"] += 1
 
-    # 決定存檔方式：若原本有加密，就用原密碼加密回去
-    final_password = password if is_encrypted else None
-    output = save_excel_encrypted(wb, final_password)
+    # 直接存成 BytesIO (不加密 Excel 本體，改為最後加密 ZIP)
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
     
     return output, stats
 
@@ -143,13 +120,15 @@ st.set_page_config(page_title="投保名單檢查工具", page_icon="🚄")
 
 st.title("🚄 科普列車 - 投保名單自動檢查工具")
 st.markdown(f"**檢查標準日：{REF_DATE.date()}**")
-st.info("功能：自動統計年齡、檢查身分證格式、針對錯誤欄位標記黃底。支援 Excel 加密檔 (輸出檔案會維持原密碼加密)。")
+st.info("功能：自動統計年齡、檢查身分證格式、針對錯誤欄位標記黃底。")
 
 # 側邊欄：設定與密碼
 with st.sidebar:
     st.header("⚙️ 設定")
     password = st.text_input("檔案密碼 (若無加密可留空)", type="password")
-    st.caption("如果您的 Excel 有設密碼，請在此輸入。程式解鎖檢查後，會使用「相同的密碼」將檔案重新加密匯出。")
+    st.caption("輸入密碼後，系統會用此密碼解鎖 Excel 進行檢查。")
+    st.markdown("---")
+    st.warning("⚠️ 注意：檢查後的檔案將被打包成「加密 ZIP」。解壓縮密碼與您上方輸入的密碼相同 (若未輸入則無密碼)。")
 
 # 檔案上傳區
 uploaded_files = st.file_uploader("請拖曳或選擇 Excel 檔案 (可多選)", type=['xlsx'], accept_multiple_files=True)
@@ -162,6 +141,9 @@ if uploaded_files:
         
         for i, file in enumerate(uploaded_files):
             content = file.read()
+            # 重設指標，避免讀取問題
+            file.seek(0)
+            
             processed_data, stats = process_single_file(file.name, content, password)
             
             summary_report.append(stats)
@@ -176,18 +158,39 @@ if uploaded_files:
 
         if processed_files:
             zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w") as zf:
-                for fname, f_data in processed_files:
-                    zf.writestr(fname, f_data.getvalue())
-                
-                report_str = f"【檢查統計報告 - {datetime.now().strftime('%Y-%m-%d %H:%M')}】\n\n"
-                for item in summary_report:
-                    report_str += f"📄 {item['filename']}: {item['msg']}\n"
-                    if item['status'] == 'Success':
-                        report_str += f"   - 未滿15歲: {item['under_15']}\n   - 成人: {item['adult']}\n   - 錯誤數: {item['errors']}\n"
-                    report_str += "-"*30 + "\n"
-                zf.writestr("總表統計.txt", report_str)
             
+            # 判斷是否要加密 ZIP
+            if password:
+                # 使用 AES 加密建立 ZIP
+                with pyzipper.AESZipFile(zip_buffer, "w", compression=pyzipper.ZIP_LZMA, encryption=pyzipper.WZ_AES) as zf:
+                    zf.setpassword(password.encode('utf-8'))
+                    
+                    # 加入 Excel
+                    for fname, f_data in processed_files:
+                        zf.writestr(fname, f_data.getvalue())
+                    
+                    # 加入文字報告
+                    report_str = f"【檢查統計報告 - {datetime.now().strftime('%Y-%m-%d %H:%M')}】\n\n"
+                    for item in summary_report:
+                        report_str += f"📄 {item['filename']}: {item['msg']}\n"
+                        if item['status'] == 'Success':
+                            report_str += f"   - 未滿15歲: {item['under_15']}\n   - 成人: {item['adult']}\n   - 錯誤數: {item['errors']}\n"
+                        report_str += "-"*30 + "\n"
+                    zf.writestr("總表統計.txt", report_str)
+            else:
+                # 一般無密碼 ZIP
+                with pyzipper.ZipFile(zip_buffer, "w") as zf:
+                    for fname, f_data in processed_files:
+                        zf.writestr(fname, f_data.getvalue())
+                    
+                    report_str = f"【檢查統計報告 - {datetime.now().strftime('%Y-%m-%d %H:%M')}】\n\n"
+                    for item in summary_report:
+                        report_str += f"📄 {item['filename']}: {item['msg']}\n"
+                        if item['status'] == 'Success':
+                            report_str += f"   - 未滿15歲: {item['under_15']}\n   - 成人: {item['adult']}\n   - 錯誤數: {item['errors']}\n"
+                        report_str += "-"*30 + "\n"
+                    zf.writestr("總表統計.txt", report_str)
+
             st.download_button(
                 label="📦 下載檢查結果 (ZIP壓縮檔)",
                 data=zip_buffer.getvalue(),
